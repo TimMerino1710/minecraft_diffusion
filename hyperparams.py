@@ -124,3 +124,117 @@ class HparamsVQGAN(HparamsBase):
 
         else:
             raise KeyError(f'Defaults not defined for VQGAN model on dataset: {self.dataset}')
+
+
+class HparamsAbsorbing(HparamsBase):
+    def __init__(self, dataset):
+
+        self.loss_type = "reweighted_elbo"
+        self.sample_type = "diffusion"
+        self.mask_schedule = "random"
+        self.total_steps = 256
+        self.sample_steps = 256
+        self.attn_pdrop = 0.
+        self.embd_pdrop = 0.
+        self.resid_pdrop = 0.
+        self.temp = 1.0
+        self.visdom_port = 8097
+        self.quantizer = 'nearest'
+        self.train_steps = 250000
+        self.steps_per_log = 500
+        self.steps_per_display_output = 5000
+        self.steps_per_save_output = 5000
+        self.steps_per_checkpoint = 25000
+        self.sample_type = "diffusion"
+        self.sampler = "absorbing"
+        super().__init__(dataset)
+        if self.dataset == "MNIST":
+            self.val_split = 0.1
+            self.batch_size = 20
+            self.bert_n_emb = 256
+            self.bert_n_head = 4
+            self.bert_n_layers = 12
+            self.block_size = 128
+            self.lr = 2e-4
+            self.warmup_iters = 10000
+            
+        elif self.dataset == 'maps':
+            self.val_split = 0.1
+            self.batch_size = 32
+            self.bert_n_emb = 256
+            self.bert_n_head = 4
+            self.bert_n_layers = 12
+            self.block_size = 128
+            self.lr = 2e-4
+            self.warmup_iters = 10000
+
+        elif self.dataset == 'minecraft':
+            self.val_split = 0.1
+            self.batch_size = 8
+            self.bert_n_emb = 256
+            self.bert_n_head = 4
+            self.bert_n_layers = 12
+            self.block_size = 256
+            self.lr = 2e-4
+            self.warmup_iters = 10000
+            
+        elif self.dataset == "churches" or self.dataset == "bedrooms":
+            self.batch_size = 20
+            self.bert_n_emb = 256
+            self.bert_n_head = 4
+            self.bert_n_layers = 12
+            self.block_size = 256
+            self.lr = 2e-4
+            self.warmup_iters = 10000
+
+        elif self.dataset == "ffhq":
+            self.batch_size = 20
+            self.bert_n_emb = 512
+            self.bert_n_head = 8
+            self.bert_n_layers = 24
+            self.block_size = 512
+            self.lr = 1e-4
+            self.warmup_iters = 30000
+
+        else:
+            raise KeyError(f"Defaults not defined for multinomial diffusion model on dataset: {self.dataset}")
+
+def load_hparams_from_json(log_dir):
+    import json
+    import os
+    
+    json_path = os.path.join(log_dir, 'hparams.json')
+    
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"No hparams.json file found in {log_dir}")
+    
+    with open(json_path, 'r') as f:
+        hparams = json.load(f)
+    
+
+    
+    return hparams
+
+def dict_to_vcqgan_hparams(hparams_dict, dataset=None):
+    # Determine which hyperparameter class to use based on the dataset
+    if dataset == None:
+        dataset = hparams_dict.get('dataset', 'MNIST')  # Default to MNIST if not specified
+    
+    vq_hyper = HparamsVQGAN(dataset)
+    # Set attributes from the dictionary
+    for key, value in hparams_dict.items():
+        setattr(vq_hyper, key, value)
+    
+    return vq_hyper
+
+def dict_to_absorbing_hparams(hparams_dict, dataset=None):
+    # Determine which hyperparameter class to use based on the dataset
+    if dataset == None:
+        dataset = hparams_dict.get('dataset', 'MNIST')  # Default to MNIST if not specified
+    
+    vq_abs = HparamsAbsorbing(dataset)
+    # Set attributes from the dictionary
+    for key, value in hparams_dict.items():
+        setattr(vq_abs, key, value)
+    
+    return vq_abs

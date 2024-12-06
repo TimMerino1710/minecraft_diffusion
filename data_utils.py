@@ -242,3 +242,48 @@ def visualize_images(data_loader):
         ax.imshow(img, cmap='gray')  # Display image in grayscale
         ax.axis('off')  # Hide axes ticks
     plt.show()
+
+
+# So that our conversion back to the original indexes isn't tied to the dataset, we can just load it from file
+class BlockConverter:
+    def __init__(self, index_to_block_map=None, block_to_index_map=None):
+        """
+        Initialize with pre-computed mappings
+        Can be initialized either with saved mappings or by creating new ones
+        """
+        self.index_to_block = index_to_block_map
+        self.block_to_index = block_to_index_map
+    
+    @classmethod
+    def from_dataset(cls, data_path):
+        """Create mappings from a dataset file"""
+        chunks = torch.from_numpy(np.load(data_path))
+        unique_blocks = torch.unique(chunks).numpy()
+        
+        block_to_index = {int(block): idx for idx, block in enumerate(unique_blocks)}
+        index_to_block = {idx: int(block) for idx, block in enumerate(unique_blocks)}
+        
+        return cls(index_to_block, block_to_index)
+    
+    @classmethod
+    def load_mappings(cls, path):
+        """Load pre-saved mappings"""
+        mappings = torch.load(path)
+        return cls(mappings['index_to_block'], mappings['block_to_index'])
+    
+    def save_mappings(self, path):
+        """Save mappings for later use"""
+        torch.save({
+            'index_to_block': self.index_to_block,
+            'block_to_index': self.block_to_index
+        }, path)
+    
+    def convert_to_original_blocks(self, data):
+        """Convert from indices back to original block IDs"""
+        if len(data.shape) == 5:  # [B, C, H, W, D] or [C, H, W, D]
+            data = torch.argmax(data, dim=1 if len(data.shape) == 5 else 0)
+        return torch.tensor([[[[self.index_to_block[int(b)] 
+                              for b in row]
+                             for row in layer]
+                            for layer in slice_]
+                           for slice_ in data])
