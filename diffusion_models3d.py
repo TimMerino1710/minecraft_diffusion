@@ -410,7 +410,123 @@ class AbsorbingDiffusion(Sampler):
             'masks': masks,    # List of boolean masks showing what's revealed
             'final': x_t      # Final result
         }
+    
+    def sample_with_inpainting(self, base_latent, slice_coords, sample_steps=None, temp=1.0):
+        """
+        Perform inpainting on specific coordinates of a base latent.
+        
+        Args:
+            base_latent (torch.Tensor): Starting latent tensor [D, H, W]
+            slice_coords (list): List of (x, y, z) coordinates to inpaint
+            sample_steps (int): Number of denoising steps
+            temp (float): Temperature for sampling
+        """
+        device = 'cuda'
+        # Add batch dimension if not present
+        if len(base_latent.shape) == 3:
+            base_latent = base_latent.unsqueeze(0)
+        
+        # Create initial x_t as copy of base_latent
+        x_t = base_latent.clone().to(device)
+        b = x_t.size(0)  # Batch size
+        
+        # Create mask for tracking what's been unmasked
+        unmasked = torch.ones_like(x_t, device=device, dtype=torch.bool)
+        
+        # Mask out the specified coordinates
+        for coord in slice_coords:
+            x_t[:, coord[0], coord[1], coord[2]] = self.mask_id
+            unmasked[:, coord[0], coord[1], coord[2]] = False
+        
+        # Create coordinate mask for what we want to inpaint
+        inpaint_mask = torch.zeros_like(x_t, device=device, dtype=torch.bool)
+        for coord in slice_coords:
+            inpaint_mask[:, coord[0], coord[1], coord[2]] = True
+        
+        sample_steps = list(range(1, sample_steps+1))
+        
+        for t in reversed(sample_steps):
+            print(f'Inpainting timestep {t:4d}', end='\r')
+            t = torch.full((b,), t, device=device, dtype=torch.long)
+            
+            # Only unmask within our inpainting region
+            changes = (torch.rand(x_t.shape, device=device) < 1/t.float().unsqueeze(-1)) & inpaint_mask
+            changes = torch.bitwise_xor(changes, torch.bitwise_and(changes, unmasked))
+            unmasked = torch.bitwise_or(unmasked, changes)
+            
+            # Flatten for denoising
+            x_t_flat = x_t.reshape(b, -1)
+            
+            # Get predictions for all tokens
+            x_0_logits = self._denoise_fn(x_t_flat, t=t)
+            x_0_logits = x_0_logits / temp
+            x_0_dist = dists.Categorical(logits=x_0_logits)
+            x_0_hat = x_0_dist.sample().long()
+            
+            # Only update the tokens we want to inpaint
+            x_t_flat[changes.reshape(b, -1)] = x_0_hat[changes.reshape(b, -1)]
+            x_t = x_t_flat.reshape(x_t.shape)
+        
+        return x_t
 
+    def sample_with_outpainting(self, base_latent, preserve_coords, sample_steps=None, temp=1.0):
+        """
+        Perform outpainting by preserving specific coordinates and generating everything else.
+        
+        Args:
+            base_latent (torch.Tensor): Starting latent tensor [D, H, W]
+            preserve_coords (list): List of (x, y, z) coordinates to preserve
+            sample_steps (int): Number of denoising steps
+            temp (float): Temperature for sampling
+        """
+        device = 'cuda'
+        # Add batch dimension if not present
+        if len(base_latent.shape) == 3:
+            base_latent = base_latent.unsqueeze(0)
+        
+        # Create initial x_t filled with mask tokens
+        x_t = torch.ones_like(base_latent, device=device).long() * self.mask_id
+        b = x_t.size(0)  # Batch size
+        
+        # Create mask for tracking what's been unmasked
+        unmasked = torch.zeros_like(x_t, device=device, dtype=torch.bool)
+        
+        # Preserve the specified coordinates from base_latent
+        for coord in preserve_coords:
+            x_t[:, coord[0], coord[1], coord[2]] = base_latent[:, coord[0], coord[1], coord[2]]
+            unmasked[:, coord[0], coord[1], coord[2]] = True
+        
+        # Create coordinate mask for what we want to generate (inverse of preserve mask)
+        outpaint_mask = torch.ones_like(x_t, device=device, dtype=torch.bool)
+        for coord in preserve_coords:
+            outpaint_mask[:, coord[0], coord[1], coord[2]] = False
+        
+        sample_steps = list(range(1, sample_steps+1))
+        
+        for t in reversed(sample_steps):
+            print(f'Outpainting timestep {t:4d}', end='\r')
+            t = torch.full((b,), t, device=device, dtype=torch.long)
+            
+            # Only unmask outside preserved region
+            changes = (torch.rand(x_t.shape, device=device) < 1/t.float().unsqueeze(-1)) & outpaint_mask
+            changes = torch.bitwise_xor(changes, torch.bitwise_and(changes, unmasked))
+            unmasked = torch.bitwise_or(unmasked, changes)
+            
+            # Flatten for denoising
+            x_t_flat = x_t.reshape(b, -1)
+            
+            # Get predictions for all tokens
+            x_0_logits = self._denoise_fn(x_t_flat, t=t)
+            x_0_logits = x_0_logits / temp
+            x_0_dist = dists.Categorical(logits=x_0_logits)
+            x_0_hat = x_0_dist.sample().long()
+            
+            # Only update the tokens we want to generate
+            x_t_flat[changes.reshape(b, -1)] = x_0_hat[changes.reshape(b, -1)]
+            x_t = x_t_flat.reshape(x_t.shape)
+        
+        return x_t
+    
     def sample_mlm(self, temp=1.0, sample_steps=None):
         b, device = self.n_samples, 'cuda'
         x_0 = torch.ones((b, np.prod(self.shape)), device=device).long() * self.mask_id

@@ -314,21 +314,21 @@ class Upsample(nn.Module):
 
         return x
     
-def normalize(in_channels):
-    return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)   #   divides the channels into 32 groups, and normalizes each group. More effective for smaller batch size than batch norm
+def normalize(in_channels, num_groups=32):
+    return torch.nn.GroupNorm(num_groups=num_groups, num_channels=in_channels, eps=1e-6, affine=True) #   divides the channels into 32 groups, and normalizes each group. More effective for smaller batch size than batch norm
 
 @torch.jit.script
 def swish(x):
     return x*torch.sigmoid(x)   #  swish activation function, compiled using torch.jit.script. Smooth, non-linear activation function, works better than ReLu in some cases. swish (x) = x * sigmoid(x)
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels=None):
+    def __init__(self, in_channels, out_channels=None, num_groups=32):
         super(ResBlock, self).__init__()
         self.in_channels = in_channels
         self.out_channels = in_channels if out_channels is None else out_channels
-        self.norm1 = normalize(in_channels)
+        self.norm1 = normalize(in_channels, num_groups)  # Pass num_groups here
         self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        self.norm2 = normalize(out_channels)
+        self.norm2 = normalize(out_channels, num_groups)  # Pass num_groups here
         self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         self.conv_out = nn.Conv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
@@ -616,50 +616,7 @@ class Generator(nn.Module):
         self.norm_out = Normalize(block_in)
         self.conv_out = nn.Conv3d(block_in, H.n_channels, kernel_size=3, stride=1, padding=1)
 
-        # block_in_ch = self.nf * self.ch_mult[-1]
-        # curr_res = self.resolution // 2 ** (self.num_resolutions-1)
 
-        # print(f'resolution: {self.resolution}, num_resolutions: {self.num_resolutions}, '
-        #       f'num_res_blocks: {self.num_res_blocks}, attn_resolutions: {self.attn_resolutions}, '
-        #       f'in_channels: {self.in_channels}, out_channels: {self.out_channels}, '
-        #       f'block_in_ch: {block_in_ch}, curr_res: {curr_res}')
-
-        # blocks = []
-        # # Initial conv - now 3D
-        # blocks.append(nn.Conv3d(self.in_channels, block_in_ch, kernel_size=3, stride=1, padding=1))
-
-        # # Non-local attention block
-        # blocks.append(ResBlock(block_in_ch, block_in_ch))
-        # blocks.append(AttnBlock(block_in_ch))
-        # blocks.append(ResBlock(block_in_ch, block_in_ch))
-
-        # # Upsampling blocks
-        # for i in reversed(range(self.num_resolutions)):
-        #     block_out_ch = self.nf * self.ch_mult[i]
-
-        #     for _ in range(self.num_res_blocks):
-        #         blocks.append(ResBlock(block_in_ch, block_out_ch))
-        #         block_in_ch = block_out_ch
-
-        #         if curr_res in self.attn_resolutions:
-        #             blocks.append(AttnBlock(block_in_ch))
-
-        #     if i != 0:
-        #         blocks.append(Upsample(block_in_ch))
-        #         curr_res = curr_res * 2
-
-        # # Final processing
-        # blocks.append(normalize(block_in_ch))
-        # blocks.append(nn.Conv3d(block_in_ch, self.out_channels, kernel_size=3, stride=1, padding=1))
-
-        # self.blocks = nn.ModuleList(blocks)
-
-        # # Used for calculating ELBO - fine tuned after training
-        # self.logsigma = nn.Sequential(
-        #     nn.Conv3d(block_in_ch, block_in_ch, kernel_size=3, stride=1, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv3d(block_in_ch, H.n_channels, kernel_size=1, stride=1, padding=0)
-        # ).cuda()
     @property
     def last_layer(self):
         return self.conv_out.weight
@@ -696,13 +653,111 @@ class Generator(nn.Module):
 
         return h
 
-    # def probabilistic(self, x):
-    #     with torch.no_grad():
-    #         for block in self.blocks[:-1]:
-    #             x = block(x)
-    #         mu = self.blocks[-1](x)
-    #     logsigma = self.logsigma(x)
-    #     return mu, logsigma
+class TwoStageGenerator(nn.Module):
+    def __init__(self, H):
+        super().__init__()
+        self.nf = H.nf
+        self.ch_mult = H.ch_mult
+        self.num_resolutions = len(self.ch_mult)
+        self.num_res_blocks = H.res_blocks
+        self.combine_method = H.combine_method
+        
+
+        # First stage: structure codes -> binary map
+        block_in = self.nf * self.ch_mult[self.num_resolutions-1]
+        
+        # Structure decoder (similar to current Generator but outputs single channel)
+        self.struct_conv_in = nn.Conv3d(H.z_channels, block_in, kernel_size=3, stride=1, padding=1)
+        
+        # Middle blocks for structure
+        self.struct_mid = nn.ModuleList([
+            ResBlock(block_in, block_in),
+            ResBlock(block_in, block_in)
+        ])
+        
+        # Upsampling blocks for structure
+        self.struct_up_blocks = nn.ModuleList()
+        for i_level in reversed(range(self.num_resolutions)):
+            up_block = nn.Module()
+            res_block = nn.ModuleList()
+            block_out = self.nf * self.ch_mult[i_level]
+            
+            for _ in range(self.num_res_blocks + 1):
+                res_block.append(ResBlock(block_in, block_out))
+                block_in = block_out
+                
+            if i_level != 0:
+                up_block.upsample = Upsample(block_in)
+            
+            up_block.res = res_block
+            self.struct_up_blocks.append(up_block)
+            
+        # Final layers for binary output
+        self.struct_norm_out = Normalize(block_in)
+        self.struct_conv_out = nn.Conv3d(block_in, 1, kernel_size=3, stride=1, padding=1)
+        
+       # Calculate combined channels
+        if self.combine_method == 'concat':
+            combined_channels = 1 + H.z_channels  # 33 channels
+        else:  # multiply
+            combined_channels = block_in
+
+        # Just use a single conv layer to map from combined_channels to block_in
+        self.initial_conv = nn.Conv3d(combined_channels, block_in, kernel_size=3, stride=1, padding=1)
+
+        # Then process with regular blocks using standard grouping
+        self.final_blocks = nn.ModuleList([
+            ResBlock(block_in, block_in),  # Now everything uses block_in channels
+            ResBlock(block_in, block_in)
+        ])
+
+        self.norm_out = normalize(block_in)
+        self.conv_out = nn.Conv3d(block_in, H.n_channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, z):
+        # Split input into structure and style codes
+        B, C, H, W, D = z.shape
+        z_struct = z[:, :C//2]  # First half of channels
+        z_style = z[:, C//2:]   # Second half of channels
+        
+        # Structure path
+        h_struct = self.struct_conv_in(z_struct)
+        
+        for mid_block in self.struct_mid:
+            h_struct = mid_block(h_struct)
+            
+        for block in self.struct_up_blocks:
+            for res_block in block.res:
+                h_struct = res_block(h_struct)
+            if hasattr(block, 'upsample'):
+                h_struct = block.upsample(h_struct)
+                
+        h_struct = self.struct_norm_out(h_struct)
+        h_struct = nonlinearity(h_struct)
+        binary_out = self.struct_conv_out(h_struct)
+        binary_out = torch.sigmoid(binary_out)  # Convert to probabilities
+        
+        # Simply upsample style codes to match spatial dimensions
+        h_style = F.interpolate(z_style, size=(24, 24, 24), mode='trilinear', align_corners=False)
+        
+        # After combining binary_out and style
+        if self.combine_method == 'concat':
+            h_combined = torch.cat([binary_out, h_style], dim=1)
+        else:  # multiply
+            h_combined = binary_out * h_style
+
+        # First map to block_in channels
+        h_combined = self.initial_conv(h_combined)
+
+        # Then process with regular blocks
+        for block in self.final_blocks:
+            h_combined = block(h_combined)
+            
+        h_combined = self.norm_out(h_combined)
+        h_combined = nonlinearity(h_combined)
+        out = self.conv_out(h_combined)
+        
+        return out, binary_out  # Return both final output and binary reconstruction
 
 class PatchGAN3DDiscriminator(nn.Module):
     """3D PatchGAN discriminator adapted for Minecraft voxel data"""
@@ -879,7 +934,7 @@ class BiomeFeatureModel(nn.Module):
         super().__init__()
         self.biome_classifier = BiomeClassifier(
             num_block_types=43,
-            num_biomes=13,
+            num_biomes=14,
             feature_dim=256
         ).cuda()
         
@@ -996,6 +1051,7 @@ class VQLossDualCodebook(nn.Module):
         self.codebook_weight = H.codebook_weight
         self.biome_weight = H.biome_weight
         self.disentanglement_ratio = H.disentanglement_ratio
+        self.binary_recon_weight = H.binary_reconstruction_weight
         
         # Loss functions
         self.disc_loss = non_saturating_d_loss
@@ -1036,13 +1092,21 @@ class VQLossDualCodebook(nn.Module):
 
     def forward(self, codebook_loss_style, codebook_loss_struct,
                 inputs, reconstructions, disentangle_loss, biome_feat,
-                optimizer_idx, global_step, last_layer=None):
+                optimizer_idx, global_step, last_layer=None, binary_out=None, binary_target=None):
         
         if optimizer_idx == 0:
             rec_loss = F.cross_entropy(
                 reconstructions.contiguous(), 
                 torch.argmax(inputs, dim=1).contiguous()
             ) * self.reconstruction_weight
+
+            # Binary reconstruction loss (if in two-stage mode)
+            binary_recon_loss = 0.0
+            if binary_out is not None and binary_target is not None:
+                binary_recon_loss = F.binary_cross_entropy(
+                    binary_out.squeeze(1),
+                    binary_target
+                ) * self.binary_recon_weight
                         
             # Codebook losses
             style_loss = sum(codebook_loss_style[:3]) * self.codebook_weight
@@ -1066,18 +1130,19 @@ class VQLossDualCodebook(nn.Module):
             g_loss = self.gen_loss(logits_fake)
             
             if self.disc_adaptive_weight:
-                null_loss = rec_loss + biome_feat_loss
+                null_loss = rec_loss + biome_feat_loss + binary_recon_loss
                 disc_adaptive_weight = self.calculate_adaptive_weight(null_loss, g_loss, last_layer)
                 g_loss = g_loss * disc_weight * disc_adaptive_weight
             else:
                 g_loss = g_loss * disc_weight
             
             # Total loss
-            loss = rec_loss + style_loss + struct_loss + biome_feat_loss + disent_loss + g_loss
+            loss = rec_loss + style_loss + struct_loss + biome_feat_loss + disent_loss + g_loss + binary_recon_loss
             
             return {
                 'loss': loss,
                 'rec_loss': rec_loss,
+                'binary_rec_loss': binary_recon_loss,
                 'style_loss': style_loss,
                 'struct_loss': struct_loss,
                 'biome_feat_loss': biome_feat_loss,
@@ -1225,7 +1290,8 @@ class FQModel(nn.Module):
         self.in_channels = H.n_channels
         self.nf = H.nf
         self.n_blocks = H.res_blocks
-        self.codebook_size = H.codebook_size
+        self.struct_codebook_size = H.struct_codebook_size
+        self.style_codebook_size = H.style_codebook_size
         self.embed_dim = H.emb_dim
         self.ch_mult = H.ch_mult
         self.num_resolutions = len(self.ch_mult)
@@ -1234,6 +1300,7 @@ class FQModel(nn.Module):
         self.with_biome_supervision = H.with_biome_supervision
         self.with_disentanglement = H.with_disentanglement
         self.disentanglement_ratio = H.disentanglement_ratio
+        self.two_stage_decoder = H.two_stage_decoder
         
         # Two head encoder
         self.encoder = Encoder(
@@ -1248,7 +1315,7 @@ class FQModel(nn.Module):
         # Quantizer for style head (semantic)
         self.quantize_style = FQVectorQuantizer(
             # self.codebook_size, 
-            12, 
+            self.style_codebook_size, 
             self.embed_dim,
             H.beta, 
             H.entropy_loss_ratio,
@@ -1259,7 +1326,7 @@ class FQModel(nn.Module):
 
         # Quantizer for structural head (visual)
         self.quantize_struct = FQVectorQuantizer(
-            self.codebook_size, 
+            self.struct_codebook_size, 
             self.embed_dim,
             H.beta, 
             H.entropy_loss_ratio,
@@ -1271,7 +1338,12 @@ class FQModel(nn.Module):
         # Pixel decoder
         input_dim = self.embed_dim * 2  # Combined dimension from both codebooks
         self.post_quant_conv = nn.Conv3d(input_dim, self.z_channels, 1)
-        self.decoder = Generator(H, z_channels=self.z_channels)
+        # self.decoder = Generator(H, z_channels=self.z_channels)
+        # Choose decoder type based on hyperparameter
+        if H.two_stage_decoder:
+            self.decoder = TwoStageGenerator(H)
+        else:
+            self.decoder = Generator(H, z_channels=self.z_channels)
 
         # Determine downsampling factor
         if self.num_resolutions == 5:
@@ -1333,10 +1405,23 @@ class FQModel(nn.Module):
             disentangle_loss = 0
 
         # Combine quantized representations and decode
-        quant = torch.cat([quant_struct, quant_style], dim=1)
-        dec = self.decoder(quant)
+        # quant = torch.cat([quant_struct, quant_style], dim=1)
+        # dec = self.decoder(quant)
 
-        return dec, emb_loss_style, emb_loss_struct, disentangle_loss, style_feat
+        # Combine quantized representations and decode
+        quant = torch.cat([quant_struct, quant_style], dim=1)
+        
+        if self.two_stage_decoder:
+            dec, binary_out = self.decoder(quant)
+            # Create binary target (you'll need to implement this based on your data)
+            # binary_target = self.create_binary_target(input)
+            # binary_loss = F.binary_cross_entropy(binary_out, binary_target)
+            return dec, binary_out,  emb_loss_style, emb_loss_struct, disentangle_loss, style_feat
+        else:
+            dec = self.decoder(quant)
+            return dec, emb_loss_style, emb_loss_struct, disentangle_loss, style_feat
+        
+        # return dec, emb_loss_style, emb_loss_struct, disentangle_loss, style_feat
     
 class HparamsBase(dict):
     def __init__(self, dataset):
@@ -1379,9 +1464,10 @@ class HparamsFQGAN(HparamsBase):
             self.latent_shape = [1, 6, 6, 6]
             
             # New parameters for dual codebook architecture
-            self.codebook_size = 128  # Size of each codebook
-            self.emb_dim = 256  # Embedding dimension
-            self.z_channels = 256  # Bottleneck channels
+            self.struct_codebook_size = 32  # Size of each codebook
+            self.style_codebook_size = 20  # Size of each codebook
+            self.emb_dim = 32  # Embedding dimension
+            self.z_channels = 32  # Bottleneck channels
             self.ch_mult = [1, 2, 4]  # Channel multipliers for progressive downsampling
             self.num_resolutions = len(self.ch_mult)
             self.attn_resolutions = [6]  # Resolutions at which to apply attention
@@ -1391,11 +1477,11 @@ class HparamsFQGAN(HparamsBase):
             self.disc_weight_max = 0.5  # Weight for discriminator loss
             self.disc_weight_min = 0.0  # Weight for discriminator loss
             self.disc_adaptive_weight = True  # Enable adaptive weighting
-            self.disc_start_step = 5000  # Step to start discriminator training
+            self.disc_start_step = 7500  # Step to start discriminator training
             self.reconstruction_weight = 1.0  # Weight for reconstruction loss
             self.codebook_weight = 1.0  # Weight for codebook loss
             self.biome_weight = 1.0  # Weight for biome feature prediction
-            self.disentanglement_ratio = 0.25  # Weight for disentanglement loss
+            self.disentanglement_ratio = 0.5  # Weight for disentanglement loss
             
             # Codebook specific parameters
             self.beta = 0.5  # Commitment loss coefficient
@@ -1407,7 +1493,7 @@ class HparamsFQGAN(HparamsBase):
             self.lr = 1e-4  # Learning rate
             self.beta1 = 0.9  # Adam beta1
             self.beta2 = 0.95  # Adam beta2
-            self.disc_layers = 4  # Number of discriminator layers
+            self.disc_layers = 3  # Number of discriminator layers
             self.train_steps = 10000
             self.start_step = 0
             
@@ -1420,7 +1506,7 @@ class HparamsFQGAN(HparamsBase):
             
             # Logging parameters (if not already present)
             self.steps_per_log = 150
-            self.steps_per_checkpoint = 1000
+            self.steps_per_checkpoint = 500
             self.steps_per_display_output = 500
             self.steps_per_save_output = 500
             self.steps_per_validation = 150
@@ -1428,10 +1514,13 @@ class HparamsFQGAN(HparamsBase):
             self.val_samples_to_display = 4
             self.visdom_port = 8097
             
-
+            # Two stage decoder stuff
+            self.binary_reconstruction_weight = 1
+            self.two_stage_decoder = True
+            self.combine_method = 'concat'
 
             self.num_biomes = 11  # Number of biome classes
             self.biome_feat_dim = 256  # Dimension of biome features
-            self.biome_classifier_path = 'best_biome_classifier.pt'
+            self.biome_classifier_path = 'best_biome_classifier_airprocessed.pt'
         else:
             raise KeyError(f'Defaults not defined for dataset: {self.dataset}')

@@ -17,6 +17,7 @@ import torch.distributions as dists
 
 #  Define VQVAE classes
 #  Define VQVAE classes
+#  Define VQVAE classes
 class VectorQuantizer(nn.Module):
     def __init__(self, codebook_size, emb_dim, beta):
         super(VectorQuantizer, self).__init__()
@@ -535,7 +536,6 @@ class VQAutoEncoder(nn.Module):
             print("Generator")
             print(summary(self.generator, (H.batch_size, H.emb_dim, 4, 4)))
         
-
     def forward(self, x):
         x = self.encoder(x)
         quant, codebook_loss, quant_stats = self.quantize(x)
@@ -548,6 +548,7 @@ class VQAutoEncoder(nn.Module):
             quant, _, quant_stats = self.quantize(x)
         mu, logsigma = self.generator.probabilistic(quant)
         return mu, logsigma, quant_stats
+
 
 def calculate_adaptive_weight(recon_loss, g_loss, last_layer, disc_weight_max):
     recon_grads = torch.autograd.grad(recon_loss, last_layer, retain_graph=True)[0]
@@ -686,3 +687,63 @@ class VQGAN(nn.Module):
         x_hat = mu + 0.5*torch.exp(logsigma)*torch.randn_like(logsigma)
 
         return x_hat, stats
+
+class BiomeClassifier(nn.Module):
+    def __init__(self, num_block_types, num_biomes, feature_dim=256):
+        super(BiomeClassifier, self).__init__()
+        
+        # Initial embedding layer for one-hot encoded blocks
+        self.block_proj = nn.Conv3d(num_block_types, 64, kernel_size=1)
+        
+        # Encoder layers that will downsample to 6x6x6 spatial dimensions
+        self.encoder = nn.Sequential(
+            # Layer 1: 24x24x24 -> 12x12x12
+            nn.Conv3d(64, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(128),
+            nn.ReLU(),
+            
+            # Layer 2: 12x12x12 -> 6x6x6
+            nn.Conv3d(128, feature_dim, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm3d(feature_dim),
+            nn.ReLU(),
+        )
+        
+        # Self-attention block at 6x6x6 resolution
+        self.attention = AttnBlock(feature_dim)
+        
+        # Additional convolution after attention for feature extraction
+        self.feature_conv = nn.Conv3d(feature_dim, feature_dim, kernel_size=3, padding=1)
+        
+        # Biome prediction head
+        self.biome_head = nn.Conv3d(feature_dim, num_biomes, kernel_size=1)
+        
+        # Upsampling layer to get back to original resolution
+        self.upsample = nn.Upsample(size=(24, 24, 24), mode='trilinear', align_corners=False)
+        
+    def get_intermediate_features(self, x):
+        """Get the features after attention for representation learning"""
+        x = self.block_proj(x)
+        x = self.encoder(x)
+        x = self.attention(x)
+        return self.feature_conv(x)
+        
+    def forward(self, x, return_features=False):
+        # x shape: (batch_size, num_blocks, 24, 24, 24)
+        
+        # Initial projection and encoding
+        x = self.block_proj(x)
+        x = self.encoder(x)  # (batch_size, feature_dim, 6, 6, 6)
+        
+        # Apply self-attention
+        x = self.attention(x)
+        
+        # Get features for representation learning
+        features = self.feature_conv(x)
+        
+        # Predict biomes and upsample
+        biome_logits = self.biome_head(features)  # (batch_size, num_biomes, 6, 6, 6)
+        biome_logits = self.upsample(biome_logits)  # (batch_size, num_biomes, 24, 24, 24)
+        
+        if return_features:
+            return biome_logits, features
+        return biome_logits
