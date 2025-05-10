@@ -3,7 +3,7 @@ import numpy as np
 import os
 import torch
 import torchvision
-import visdom
+# import visdom
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F

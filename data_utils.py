@@ -15,7 +15,98 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import random
-
+def combine_chunk_files(input_directory, output_file_path):
+    """
+    Combines multiple Minecraft chunk NPZ files from a directory into a single NPZ file.
+    
+    Args:
+        input_directory (str or Path): Path to directory containing NPZ files with voxels and biome data
+        output_file_path (str or Path): Path where the combined data will be saved
+    
+    Returns:
+        dict: Information about the combined data including counts and shapes
+    """
+    input_directory = Path(input_directory)
+    output_file_path = Path(output_file_path)
+    
+    # Ensure input directory exists
+    if not input_directory.exists() or not input_directory.is_dir():
+        raise ValueError(f"Input directory does not exist or is not a directory: {input_directory}")
+    
+    # Find all NPZ files in the directory
+    npz_files = list(input_directory.glob("*.npz"))
+    if not npz_files:
+        raise ValueError(f"No NPZ files found in directory: {input_directory}")
+    
+    print(f"Found {len(npz_files)} NPZ files in {input_directory}")
+    
+    # Load the first file to determine shapes
+    first_data = np.load(npz_files[0], allow_pickle=True)
+    voxel_shape = first_data['voxels'].shape
+    biome_shape = first_data['biome'].shape if 'biome' in first_data else None
+    
+    # Prepare arrays to hold all data
+    all_voxels = []
+    all_biomes = []
+    
+    # Process all files
+    for i, file_path in enumerate(npz_files):
+        if i % 100 == 0:
+            print(f"Processing file {i+1}/{len(npz_files)}")
+        
+        try:
+            data = np.load(file_path, allow_pickle=True)
+            voxels = data['voxels']
+            
+            # Verify shape consistency
+            if voxels.shape != voxel_shape:
+                print(f"Warning: Skipping file {file_path} due to shape mismatch. "
+                      f"Expected {voxel_shape}, got {voxels.shape}")
+                continue
+            
+            all_voxels.append(voxels)
+            
+            # Handle biomes if present
+            if 'biome' in data:
+                biomes = data['biome']
+                if biome_shape is None:
+                    biome_shape = biomes.shape
+                if biomes.shape != biome_shape:
+                    print(f"Warning: Biome shape mismatch in {file_path}. "
+                          f"Expected {biome_shape}, got {biomes.shape}")
+                all_biomes.append(biomes)
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
+    
+    # Stack all data
+    combined_voxels = np.stack(all_voxels)
+    combined_biomes = np.stack(all_biomes) if all_biomes else None
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_file_path.parent, exist_ok=True)
+    
+    # Save combined data
+    if combined_biomes is not None:
+        np.savez(output_file_path, chunks=combined_voxels, biomes=combined_biomes)
+        print(f"Saved combined data to {output_file_path}")
+        print(f"Combined voxel shape: {combined_voxels.shape}")
+        print(f"Combined biome shape: {combined_biomes.shape}")
+        return {
+            "num_chunks": len(all_voxels),
+            "voxel_shape": combined_voxels.shape,
+            "biome_shape": combined_biomes.shape
+        }
+    else:
+        np.savez(output_file_path, chunks=combined_voxels)
+        print(f"Saved combined voxel data to {output_file_path} (no biome data found)")
+        print(f"Combined voxel shape: {combined_voxels.shape}")
+        return {
+            "num_chunks": len(all_voxels),
+            "voxel_shape": combined_voxels.shape,
+            "biome_shape": None
+        }
+    
+    
 def rotate_voxels_90(voxels, k=1):
     """
     Rotate voxels around Y axis by k*90 degrees
@@ -293,6 +384,262 @@ class BlockBiomeConverter:
             block_mappings: dict containing 'index_to_block' and 'block_to_index'
             biome_mappings: dict containing 'index_to_biome' and 'biome_to_index'
         """
+        self.block_to_str =  {
+            0: "ACACIA_DOOR",
+            1: "ACACIA_FENCE",
+            2: "ACACIA_FENCE_GATE",
+            3: "ACACIA_STAIRS",
+            4: "ACTIVATOR_RAIL",
+            5: "AIR",
+            6: "ANVIL",
+            7: "BARRIER",
+            8: "BEACON",
+            9: "BED",
+            10: "BEDROCK",
+            11: "BEETROOTS",
+            12: "BIRCH_DOOR",
+            13: "BIRCH_FENCE",
+            14: "BIRCH_FENCE_GATE",
+            15: "BIRCH_STAIRS",
+            16: "BLACK_GLAZED_TERRACOTTA",
+            17: "BLACK_SHULKER_BOX",
+            18: "BLUE_GLAZED_TERRACOTTA",
+            19: "BLUE_SHULKER_BOX",
+            20: "BONE_BLOCK",
+            21: "BOOKSHELF",
+            22: "BREWING_STAND",
+            23: "BRICK_BLOCK",
+            24: "BRICK_STAIRS",
+            25: "BROWN_GLAZED_TERRACOTTA",
+            26: "BROWN_MUSHROOM",
+            27: "BROWN_MUSHROOM_BLOCK",
+            28: "BROWN_SHULKER_BOX",
+            29: "CACTUS",
+            30: "CAKE",
+            31: "CARPET",
+            32: "CARROTS",
+            33: "CAULDRON",
+            34: "CHAIN_COMMAND_BLOCK",
+            35: "CHEST",
+            36: "CHORUS_FLOWER",
+            37: "CHORUS_PLANT",
+            38: "CLAY",
+            39: "COAL_BLOCK",
+            40: "COAL_ORE",
+            41: "COBBLESTONE",
+            42: "COBBLESTONE_WALL",
+            43: "COCOA",
+            44: "COMMAND_BLOCK",
+            45: "CONCRETE",
+            46: "CONCRETE_POWDER",
+            47: "CRAFTING_TABLE",
+            48: "CYAN_GLAZED_TERRACOTTA",
+            49: "CYAN_SHULKER_BOX",
+            50: "DARK_OAK_DOOR",
+            51: "DARK_OAK_FENCE",
+            52: "DARK_OAK_FENCE_GATE",
+            53: "DARK_OAK_STAIRS",
+            54: "DAYLIGHT_DETECTOR",
+            55: "DAYLIGHT_DETECTOR_INVERTED",
+            56: "DEADBUSH",
+            57: "DETECTOR_RAIL",
+            58: "DIAMOND_BLOCK",
+            59: "DIAMOND_ORE",
+            60: "DIRT",
+            61: "DISPENSER",
+            62: "DOUBLE_PLANT",
+            63: "DOUBLE_STONE_SLAB",
+            64: "DOUBLE_STONE_SLAB2",
+            65: "DOUBLE_WOODEN_SLAB",
+            66: "DRAGON_EGG",
+            67: "DROPPER",
+            68: "EMERALD_BLOCK",
+            69: "EMERALD_ORE",
+            70: "ENCHANTING_TABLE",
+            71: "ENDER_CHEST",
+            72: "END_BRICKS",
+            73: "END_GATEWAY",
+            74: "END_PORTAL",
+            75: "END_PORTAL_FRAME",
+            76: "END_ROD",
+            77: "END_STONE",
+            78: "FARMLAND",
+            79: "FENCE",
+            80: "FENCE_GATE",
+            81: "FIRE",
+            82: "FLOWER_POT",
+            83: "FLOWING_LAVA",
+            84: "FLOWING_WATER",
+            85: "FROSTED_ICE",
+            86: "FURNACE",
+            87: "GLASS",
+            88: "GLASS_PANE",
+            89: "GLOWSTONE",
+            90: "GOLDEN_RAIL",
+            91: "GOLD_BLOCK",
+            92: "GOLD_ORE",
+            93: "GRASS",
+            94: "GRASS_PATH",
+            95: "GRAVEL",
+            96: "GRAY_GLAZED_TERRACOTTA",
+            97: "GRAY_SHULKER_BOX",
+            98: "GREEN_GLAZED_TERRACOTTA",
+            99: "GREEN_SHULKER_BOX",
+            100: "HARDENED_CLAY",
+            101: "HAY_BLOCK",
+            102: "HEAVY_WEIGHTED_PRESSURE_PLATE",
+            103: "HOPPER",
+            104: "ICE",
+            105: "IRON_BARS",
+            106: "IRON_BLOCK",
+            107: "IRON_DOOR",
+            108: "IRON_ORE",
+            109: "IRON_TRAPDOOR",
+            110: "JUKEBOX",
+            111: "JUNGLE_DOOR",
+            112: "JUNGLE_FENCE",
+            113: "JUNGLE_FENCE_GATE",
+            114: "JUNGLE_STAIRS",
+            115: "LADDER",
+            116: "LAPIS_BLOCK",
+            117: "LAPIS_ORE",
+            118: "LAVA",
+            119: "LEAVES",
+            120: "LEAVES2",
+            121: "LEVER",
+            122: "LIGHT_BLUE_GLAZED_TERRACOTTA",
+            123: "LIGHT_BLUE_SHULKER_BOX",
+            124: "LIGHT_WEIGHTED_PRESSURE_PLATE",
+            125: "LIME_GLAZED_TERRACOTTA",
+            126: "LIME_SHULKER_BOX",
+            127: "LIT_FURNACE",
+            128: "LIT_PUMPKIN",
+            129: "LIT_REDSTONE_LAMP",
+            130: "LIT_REDSTONE_ORE",
+            131: "LOG",
+            132: "LOG2",
+            133: "MAGENTA_GLAZED_TERRACOTTA",
+            134: "MAGENTA_SHULKER_BOX",
+            135: "MAGMA",
+            136: "MELON_BLOCK",
+            137: "MELON_STEM",
+            138: "MOB_SPAWNER",
+            139: "MONSTER_EGG",
+            140: "MOSSY_COBBLESTONE",
+            141: "MYCELIUM",
+            142: "NETHERRACK",
+            143: "NETHER_BRICK",
+            144: "NETHER_BRICK_FENCE",
+            145: "NETHER_BRICK_STAIRS",
+            146: "NETHER_WART",
+            147: "NETHER_WART_BLOCK",
+            148: "NOTEBLOCK",
+            149: "OAK_STAIRS",
+            150: "OBSERVER",
+            151: "OBSIDIAN",
+            152: "ORANGE_GLAZED_TERRACOTTA",
+            153: "ORANGE_SHULKER_BOX",
+            154: "PACKED_ICE",
+            155: "PINK_GLAZED_TERRACOTTA",
+            156: "PINK_SHULKER_BOX",
+            157: "PISTON",
+            158: "PISTON_EXTENSION",
+            159: "PISTON_HEAD",
+            160: "PLANKS",
+            161: "PORTAL",
+            162: "POTATOES",
+            163: "POWERED_COMPARATOR",
+            164: "POWERED_REPEATER",
+            165: "PRISMARINE",
+            166: "PUMPKIN",
+            167: "PUMPKIN_STEM",
+            168: "PURPLE_GLAZED_TERRACOTTA",
+            169: "PURPLE_SHULKER_BOX",
+            170: "PURPUR_BLOCK",
+            171: "PURPUR_DOUBLE_SLAB",
+            172: "PURPUR_PILLAR",
+            173: "PURPUR_SLAB",
+            174: "PURPUR_STAIRS",
+            175: "QUARTZ_BLOCK",
+            176: "QUARTZ_ORE",
+            177: "QUARTZ_STAIRS",
+            178: "RAIL",
+            179: "REDSTONE_BLOCK",
+            180: "REDSTONE_LAMP",
+            181: "REDSTONE_ORE",
+            182: "REDSTONE_TORCH",
+            183: "REDSTONE_WIRE",
+            184: "RED_FLOWER",
+            185: "RED_GLAZED_TERRACOTTA",
+            186: "RED_MUSHROOM",
+            187: "RED_MUSHROOM_BLOCK",
+            188: "RED_NETHER_BRICK",
+            189: "RED_SANDSTONE",
+            190: "RED_SANDSTONE_STAIRS",
+            191: "RED_SHULKER_BOX",
+            192: "REEDS",
+            193: "REPEATING_COMMAND_BLOCK",
+            194: "SAND",
+            195: "SANDSTONE",
+            196: "SANDSTONE_STAIRS",
+            197: "SAPLING",
+            198: "SEA_LANTERN",
+            199: "SILVER_GLAZED_TERRACOTTA",
+            200: "SILVER_SHULKER_BOX",
+            201: "SKULL",
+            202: "SLIME",
+            203: "SNOW",
+            204: "SNOW_LAYER",
+            205: "SOUL_SAND",
+            206: "SPONGE",
+            207: "SPRUCE_DOOR",
+            208: "SPRUCE_FENCE",
+            209: "SPRUCE_FENCE_GATE",
+            210: "SPRUCE_STAIRS",
+            211: "STAINED_GLASS",
+            212: "STAINED_GLASS_PANE",
+            213: "STAINED_HARDENED_CLAY",
+            214: "STANDING_BANNER",
+            215: "STANDING_SIGN",
+            216: "STICKY_PISTON",
+            217: "STONE",
+            218: "STONEBRICK",
+            219: "STONE_BRICK_STAIRS",
+            220: "STONE_BUTTON",
+            221: "STONE_PRESSURE_PLATE",
+            222: "STONE_SLAB",
+            223: "STONE_SLAB2",
+            224: "STONE_STAIRS",
+            225: "STRUCTURE_BLOCK",
+            226: "STRUCTURE_VOID",
+            227: "TALLGRASS",
+            228: "TNT",
+            229: "TORCH",
+            230: "TRAPDOOR",
+            231: "TRAPPED_CHEST",
+            232: "TRIPWIRE",
+            233: "TRIPWIRE_HOOK",
+            234: "UNLIT_REDSTONE_TORCH",
+            235: "UNPOWERED_COMPARATOR",
+            236: "UNPOWERED_REPEATER",
+            237: "VINE",
+            238: "WALL_BANNER",
+            239: "WALL_SIGN",
+            240: "WATER",
+            241: "WATERLILY",
+            242: "WEB",
+            243: "WHEAT",
+            244: "WHITE_GLAZED_TERRACOTTA",
+            245: "WHITE_SHULKER_BOX",
+            246: "WOODEN_BUTTON",
+            247: "WOODEN_DOOR",
+            248: "WOODEN_PRESSURE_PLATE",
+            249: "WOODEN_SLAB",
+            250: "WOOL",
+            251: "YELLOW_FLOWER",
+            252: "YELLOW_GLAZED_TERRACOTTA",
+            253: "YELLOW_SHULKER_BOX"
+        }
         self.index_to_block = block_mappings['index_to_block'] if block_mappings else None
         self.block_to_index = block_mappings['block_to_index'] if block_mappings else None
         self.index_to_biome = biome_mappings['index_to_biome'] if biome_mappings else None
@@ -411,6 +758,73 @@ class BlockBiomeConverter:
                             for slice_ in data])
         else:  # No batch dimension
             return np.array([[[self.index_to_biome[int(b)] 
+                            for b in row]
+                            for row in layer]
+                            for layer in data])
+
+    def get_block_name_from_index(self, index):
+        """
+        Convert a single index to the corresponding block name.
+        
+        Args:
+            index: int - the index of the block type
+        Returns:
+            str - the name of the block
+        """
+        if self.index_to_block is None:
+            raise ValueError("Block mappings not initialized")
+        
+        block_id = self.index_to_block[index]
+        return self.block_to_str.get(block_id, f"UNKNOWN_BLOCK_{block_id}")
+    
+    def get_block_id_from_index(self, index):
+        """
+        Convert a single index to the corresponding block ID.
+        
+        Args:
+            index: int - the index of the block type
+        Returns:
+            int - the ID of the block
+        """
+        if self.index_to_block is None:
+            raise ValueError("Block mappings not initialized")
+        
+        return self.index_to_block[index]
+    
+    def convert_to_block_names(self, data):
+        """
+        Convert from indices or IDs to block names.
+        
+        Args:
+            data: torch.Tensor of either:
+                - one-hot encoded blocks [B, C, H, W, D] or [C, H, W, D]
+                - indexed blocks [B, H, W, D] or [H, W, D]
+                - block ID blocks [B, H, W, D] or [H, W, D]
+        Returns:
+            numpy array of block names with shape [B, H, W, D] or [H, W, D]
+        """
+        # First convert to block IDs if necessary
+        if len(data.shape) == 5 or (len(data.shape) == 4 and data.shape[0] == len(self.block_to_index)):
+            # One-hot encoded, convert to indices first
+            data = torch.argmax(data, dim=1 if len(data.shape) == 5 else 0)
+            # Then convert indices to block IDs
+            data = self.convert_to_original_blocks(data)
+        elif self.index_to_block is not None and (
+            (len(data.shape) == 4 and torch.max(data) < len(self.index_to_block)) or
+            (len(data.shape) == 3 and torch.max(data) < len(self.index_to_block))
+        ):
+            # These are indices, convert to block IDs
+            data = self.convert_to_original_blocks(data)
+        
+        # Now data contains block IDs, convert to names
+        if data.dim() == 4:  # Batch dimension present
+            return np.array([[[[self.block_to_str.get(int(b), f"UNKNOWN_BLOCK_{int(b)}") 
+                            for b in row]
+                            for row in layer]
+                            for layer in slice_]
+                            for slice_ in data])
+        else:  # No batch dimension
+            return np.array([[[self.block_to_str.get(int(b), f"UNKNOWN_BLOCK_{int(b)}") 
                             for b in row]
                             for row in layer]
                             for layer in data])
